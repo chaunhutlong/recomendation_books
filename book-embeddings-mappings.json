@@ -1,0 +1,30 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index": {
+      "mapping": {
+        "ignore_malformed": true
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "book_id": {
+        "type": "integer"
+      },
+      "embedding": {
+        "type": "dense_vector",
+        "dims": 512,
+        "index": true,
+        "similarity": "cosine"
+      },
+      "genres": {
+        "type": "keyword"
+      },
+      "authors": {
+        "type": "keyword"
+      }
+    }
+  }
+}
