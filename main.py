@@ -12,7 +12,7 @@ from elasticsearch import Elasticsearch
 from flask import Flask, request, jsonify
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
-
+from sklearn.preprocessing import MinMaxScaler
 
 nltk.download('stopwords')
 
@@ -27,7 +27,6 @@ es = Elasticsearch(
              ":YXNpYS1lYXN0MS5nY3AuZWxhc3RpYy1jbG91ZC5jb20kZGY4OWFlYTE4MGU3NDQwY2I2ODVjYzZmMTVhMDIzMzgkY2I5NGZjOTJiYjY2NDNkZmIxMjlmNDBkYzJjOTViODQ=",
     basic_auth=("elastic", "iwQoVJ3lqWcWKe45sH6J9KjH"),
 )
-
 
 book_images_index = "book_images_index"
 book_embeddings_index = 'book_embeddings_index'
@@ -134,29 +133,51 @@ def receive_book_images():
     return jsonify(quantized_embedding_list)
 
 
-@app.route('/embedding-books', methods=['POST'])
+@app.route('/book-features', methods=['POST'])
 def embedding_books():
     # get book data and review data from request
     data = request.get_json()
     books = data['books']
+    reviews = data['reviews']
 
     # Preprocess book data
     df_books = preprocess_book_data(pd.DataFrame(books))
 
-    # Create TF-IDF matrix
+    df_reviews = pd.DataFrame(reviews)
+    # Group the reviews by book_id and calculate the count and mean rating for each book
+    df_agg_reviews = df_reviews.groupby('book_id').agg({'rating': ['count', 'mean']}).reset_index()
+
+    # Flatten the column hierarchy in df_agg_reviews
+    df_agg_reviews.columns = [' '.join(col).strip() for col in df_agg_reviews.columns.values]
+
+    # Merge the book data with the review data
+    df_books = df_books.merge(df_agg_reviews, on='book_id', how='left')
+
+    # Fill the missing ratings with 0 count and mean rating
+    df_books['rating count'] = df_books['rating count'].fillna(0)
+    df_books['rating mean'] = df_books['rating mean'].fillna(0)
+
+    # Scale the rating count to a value between 0 and 1
+    scaler = MinMaxScaler()
+    df_books['rating count scaled'] = scaler.fit_transform(df_books[['rating count']])
+
+    # Calculate the final rating based on the scaled count and mean rating
+    df_books['final_rating'] = df_books['rating count scaled'] * df_books['rating mean']
+
+    # Create a tf-idf matrix based on the book summaries
     tfidf_matrix = create_tfidf_matrix(df_books['title'])
 
-    # Convert TF-IDF matrix to a dense vector
+    # Convert the tf-idf matrix to a dense matrix
     tfidf_matrix_dense = tfidf_matrix.toarray()
 
-    # Use PCA to reduce the dimensionality of the TF-IDF matrix
+    # use PCA to reduce the dimensionality of the tf-idf matrix
     pca = PCA(n_components=512)
     tfidf_matrix_dense = pca.fit_transform(tfidf_matrix_dense)
 
-    # Store book embeddings in Elasticsearch with the book id as the document id and genre ids as a list of integers
-    for i, book in enumerate(books):
-        genres = [genre['id'] for genre in book['genres']] if 'genres' in book else []
-        store_book_embedding(book['id'], tfidf_matrix_dense[i].tolist(), genres)
+    # Iterate over the book data
+    for index, row in df_books.iterrows():
+        # Store the book embedding in Elasticsearch
+        store_book_embedding(row['book_id'], tfidf_matrix_dense[index], row['genre_ids'], row['final_rating'])
 
     return jsonify({'message': 'Book embeddings stored in Elasticsearch.'})
 
@@ -173,14 +194,15 @@ def create_tfidf_matrix(text_data):
     return tfidf_matrix
 
 
-def store_book_embedding(book_id, book_embedding, genre_ids):
+def store_book_embedding(book_id, book_embedding, genre_ids, final_rating):
     # Store the book embedding in Elasticsearch
     es.index(
         index=book_embeddings_index,
         document={
             'book_id': book_id,
             'embedding': book_embedding,
-            'genre_ids': genre_ids
+            'genre_ids': genre_ids,
+            'rating': final_rating
         }
     )
 
@@ -194,42 +216,101 @@ def get_user_ratings(user_id):
 
 @app.route('/recommendations/books/<int:book_id>', methods=['GET'])
 def get_recommendations_for_book(book_id):
-    # Retrieve the book with the given book id from Elasticsearch
+    page = request.args.get('page', default=1, type=int)
+    page_size = request.args.get('limit', default=10, type=int)
+
     query = {
         "match": {
             "book_id": book_id
-         }
+        }
+    }
+    book = es.search(index=book_embeddings_index, query=query)['hits']['hits'][0]['_source']
+
+    # get all genre ids
+    aggregation_query = {
+        "unique_genres": {
+            "terms": {
+                "field": "genre_ids",
+                "size": 100
+            }
+        }
     }
 
-    book = es.search(index=book_embeddings_index, query=query)['hits']['hits'][0]['_source']
+    # get all genre ids
+    result = es.search(index=book_embeddings_index, aggregations=aggregation_query, size=0)
+
+    # Extract the genre buckets from the aggregation result
+    genre_buckets = result['aggregations']['unique_genres']['buckets']
+
+    # Retrieve the genre IDs from the buckets
+    all_genre_ids = [bucket['key'] for bucket in genre_buckets]
+
+    genre_ids = book['genre_ids']
+    # another genre ids is not the same as genre ids
+    another_genre_ids = list(set(all_genre_ids) - set(genre_ids))
 
     # Retrieve the book with similar book embeddings from Elasticsearch with book id not equal to the given book id
     query = {
         "script_score": {
             "query": {
-                # get book with similar genre ids with the given book and exclude the given book
                 "bool": {
-                    "must": [
-                        {"terms": {"genre_ids": book['genre_ids']}}
-                    ],
                     "must_not": [
                         {"match": {"book_id": book_id}}
-                    ]
+                    ],
+                    "should": [
+                        {"terms": {"genre_ids": genre_ids}},
+                        {"terms": {"genre_ids": another_genre_ids}},
+                    ],
                 }
             },
             "script": {
-                "source": "cosineSimilarity(params.query_vector, 'embedding') + 1.0",
+                "source":
+                    "((cosineSimilarity(params.query_vector, 'embedding') + 1) * params.title_weight) "
+                    "+ params.rating_weight * doc['rating'].value "
+                    "+ (params.genre_weight * _score)",
                 "params": {
-                    "query_vector": book['embedding']
+                    "query_vector": book['embedding'],
+                    "genre_ids": book['genre_ids'],
+                    "genre_weight": 1,
+                    "rating_weight": 0.4,
+                    "title_weight": 3.5
                 }
             }
         }
     }
 
-    # Retrieve the top 100 similar books
-    search_results = es.search(index=book_embeddings_index, query=query, size=100)['hits']['hits']
+    # Calculate the starting index based on the page and page_size
+    start_index = page * page_size
 
-    # Return the list of similar books with the book id
+    # Retrieve the top similar books with pagination
+    search_results = es.search(index=book_embeddings_index, query=query, size=page_size, from_=start_index)['hits'][
+        'hits']
+
+    # Return the paginated list of similar books with the book id and score
+    return jsonify([{'book_id': int(book['_source']['book_id']), 'score': book['_score']} for book in search_results])
+
+
+@app.route('/recommendations', methods=['GET'])
+def get_recommendations_for_homepage():
+    # Retrieve the books that have the most ratings
+    query = {
+        "script_score": {
+            "query": {
+                "match_all": {}
+            },
+            "script": {
+                "source": "doc['rating'].value"
+            }
+        }
+    }
+
+    # Calculate the starting index based on the page and page_size
+
+    # Retrieve the top 100 books with the most ratings
+    search_results = es.search(index=book_embeddings_index, query=query, size=20)['hits'][
+        'hits']
+
+    # Return the list of books with the book id and score
     return jsonify([{'book_id': int(book['_source']['book_id']), 'score': book['_score']} for book in search_results])
 
 
@@ -256,6 +337,10 @@ def perform_visual_search():
     # Retrieve the uploaded image file
     image_file = request.files['image']
 
+    # Get the pagination parameters from the request
+    page = request.args.get('page', default=1, type=int)
+    page_size = request.args.get('limit', default=10, type=int)
+
     # Read the image file and extract the embedding
     query_embedding = extract_embedding(image_file)
 
@@ -271,19 +356,15 @@ def perform_visual_search():
     # flatten the list
     query_embedding = [item for sublist in query_embedding for item in sublist]
 
-    # Get the pagination parameters from the request
-    page = request.args.get('page', default=1, type=int)
-    results_per_page = request.args.get('results_per_page', default=10, type=int)
-
     # Search for similar images using Elasticsearch
-    similar_images = search_similar_images(query_embedding, page, results_per_page)
+    similar_images = search_similar_images(query_embedding, page, page_size)
 
     # Return the ranked book images as the API response
     response = {
+        "results": [],
         "page": page,
-        "results_per_page": results_per_page,
+        "limit": page_size,
         "total_results": similar_images['total']['value'],
-        "results": []
     }
     for image in similar_images['hits']:
         response['results'].append({

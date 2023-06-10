@@ -1,7 +1,7 @@
 {
   "settings": {
     "number_of_shards": 1,
-    "number_of_replicas": 0,
+    "number_of_replicas": 1,
     "index": {
       "mapping": {
         "ignore_malformed": true
@@ -13,18 +13,14 @@
       "book_id": {
         "type": "integer"
       },
-      "embedding": {
+      "features": {
         "type": "dense_vector",
         "dims": 512,
         "index": true,
         "similarity": "cosine"
       },
-      "genres": {
-        // genres are a list of strings
+      "book_title": {
         "type": "keyword"
-      },
-      "rating": {
-        "type": "float"
       }
     }
   }
