@@ -21,7 +21,7 @@ ENV PATH="/venv/bin:$PATH"
 RUN python -m pip install --upgrade pip setuptools wheel
 
 # Install PyTorch and Torchvision
-RUN pip install torch==2.0.0+cpu torchvision==0.15.2+cpu -f https://download.pytorch.org/whl/torch_stable.html
+RUN pip install torch==2.0.1 torchvision==0.15.2+cpu -f https://download.pytorch.org/whl/torch_stable.html
 
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
