@@ -1,6 +1,5 @@
 import json
 import re
-import nltk
 import pandas as pd
 import torch
 import uuid
@@ -13,8 +12,6 @@ from flask import Flask, request, jsonify
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MinMaxScaler
-
-nltk.download('stopwords')
 
 app = Flask(__name__)
 
