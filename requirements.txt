@@ -6,3 +6,4 @@ clip==0.2.0
 elasticsearch==8.8.0
 Flask==2.3.2
 scikit-learn==1.2.2
+torchvision==0.15.2
