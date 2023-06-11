@@ -9,7 +9,6 @@ COPY requirements.txt .
 
 # Install necessary dependencies for building packages
 RUN apk add --no-cache build-base libffi-dev
-
 # Install virtualenv
 RUN pip install virtualenv
 
@@ -18,6 +17,11 @@ RUN virtualenv /venv
 
 # Activate the virtual environment
 ENV PATH="/venv/bin:$PATH"
+
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Install PyTorch and Torchvision
+RUN pip install torch==2.0.1+cpu torchvision==0.15.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
 
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
